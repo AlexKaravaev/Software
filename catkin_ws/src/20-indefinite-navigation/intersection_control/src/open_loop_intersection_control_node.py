@@ -4,6 +4,7 @@ from duckietown_msgs.msg import FSMState, BoolStamped, Twist2DStamped, LanePose,
 from std_srvs.srv import EmptyRequest, EmptyResponse, Empty
 from std_msgs.msg import String, Int16 #Imports msg
 import copy
+import yaml
 
 class OpenLoopIntersectionNode(object):
 
@@ -26,7 +27,7 @@ class OpenLoopIntersectionNode(object):
 
 
 
-    
+
         self.trajectory_reparam = rospy.get_param("~trajectory_reparam",1)
         self.pub_cmd = rospy.Publisher("~car_cmd",Twist2DStamped,queue_size=1)
         self.pub_done = rospy.Publisher("~intersection_done",BoolStamped,queue_size=1)
@@ -43,7 +44,11 @@ class OpenLoopIntersectionNode(object):
         self.srv_turn_right = rospy.Service("~turn_right", Empty, self.cbSrvRight)
         self.srv_turn_forward = rospy.Service("~turn_forward", Empty, self.cbSrvForward)
 
-        self.rate = rospy.Rate(30)
+
+	# Service for reading changed parameters in default.yaml for turning
+        self.srv_change_turning = rospy.Service("~change_turn_params", Empty, self.cvSrvTurn)
+
+	self.rate = rospy.Rate(30)
 
         # Subscribers
         self.sub_in_lane = rospy.Subscriber("~in_lane", BoolStamped, self.cbInLane, queue_size=1)
@@ -54,6 +59,15 @@ class OpenLoopIntersectionNode(object):
 
         self.params_update = rospy.Timer(rospy.Duration.from_sec(1.0), self.updateParams)
 
+    def cvSrvTurn(self, req):
+        # FIXME: path to config should be in parameter
+        self.stream = file('/home/software/catkin_ws/src/00-infrastructure/duckietown/config/baseline/intersection_control/open_loop_intersection_node/default.yaml','r')
+	maneuver_file = yaml.load(self.stream)
+	print(maneuver_file)
+	turns_list = ['turn_left','turn_forward','turn_right']
+	for i, turn in enumerate(turns_list):
+		rospy.set_param('~'+turn,maneuver_file[turn])
+		self.maneuvers[i] = self.getManeuver(turn)
 
     def cbSrvLeft(self,req):
         self.trigger(0)
@@ -80,6 +94,7 @@ class OpenLoopIntersectionNode(object):
     def cbTurnType(self,msg):
         if self.mode == "INTERSECTION_CONTROL":
             self.turn_type = msg.data #Only listen if in INTERSECTION_CONTROL mode
+	    rospy.loginfo("Open-Loop in INTERSECTION_CONTROL")
             self.trigger(self.turn_type)
 
     def cbLanePose(self,msg):
@@ -119,7 +134,7 @@ class OpenLoopIntersectionNode(object):
         new_exec_time = exec_time + self.stop_line_reading.stop_line_point.x/car_cmd.v
         rospy.loginfo("old exec_time = %s, new_exec_time = %s" ,exec_time, new_exec_time)
         ###### warning this next line is because of wrong inverse kinematics - remove the 10s after it's fixed
-        new_car_cmd = Twist2DStamped(v=car_cmd.v,omega=10*(car_cmd.omega/10 - self.lane_pose.phi/new_exec_time))
+        new_car_cmd = Twist2DStamped(v=car_cmd.v,omega=1.0*(car_cmd.omega/1.0 - self.lane_pose.phi/new_exec_time))
         new_first_leg = [new_exec_time,new_car_cmd]
         print "old car command"
         print car_cmd
@@ -144,15 +159,19 @@ class OpenLoopIntersectionNode(object):
             end_time = start_time + rospy.Duration.from_sec(pair[0])
             while rospy.Time.now() < end_time:
                 if not self.mode == "INTERSECTION_CONTROL": # If not in the mode anymore, return
+		    rospy.loginfo("Open-Loop node in trigger fuction, returning None")
                     return
                 cmd.header.stamp = rospy.Time.now()
                 self.pub_cmd.publish(cmd)
-                if index > 1:
-                    # See if need to publish interesction_done
-                    if self.in_lane and not (published_already):
-                        published_already = True
-                        self.publishDoneMsg()
-                        return
+		### Following part checks if bot is in lane after compliting several maneuvers on the intersection
+		### It was commented since recieved message in_lane was recieved too soon and
+		### open-loop_intersection_node was stopped when bot is stil on the intersection
+                #if index > 1:
+                #    # See if need to publish interesction_done
+                #    if self.in_lane and not (published_already):
+                #        published_already = True
+                #        self.publishDoneMsg()
+                #        return
                 self.rate.sleep()
         # Done with the sequence
         if not published_already:
